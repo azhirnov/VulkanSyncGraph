@@ -1,0 +1,9 @@
+LIBRARY VkLayer_sync_analyzer
+EXPORTS
+vkGetInstanceProcAddr
+vkGetDeviceProcAddr
+vkEnumerateInstanceLayerProperties
+vkEnumerateDeviceLayerProperties
+vkEnumerateInstanceExtensionProperties
+vkEnumerateDeviceExtensionProperties
+vkNegotiateLoaderLayerInterfaceVersion

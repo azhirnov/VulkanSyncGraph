@@ -1,9 +1,10 @@
 cmake_minimum_required( VERSION 3.11 FATAL_ERROR )
 
-message( STATUS "==========================================================================\n" )
-message( STATUS "project 'VkInterceptor' generation started" )
+project( "vkSyncAnalyzer" LANGUAGES C CXX )
 
-project( "VkInterceptor" LANGUAGES C CXX )
+message( STATUS "==========================================================================\n" )
+message( STATUS "project '${PROJECT_NAME}' generation started" )
+
 set_property( GLOBAL PROPERTY USE_FOLDERS ON )
 message( STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER_VERSION})" )
 message( STATUS "target system: ${CMAKE_SYSTEM_NAME} (${CMAKE_SYSTEM_VERSION})" )
@@ -34,7 +35,7 @@ endif()
 
 FetchContent_Declare( ExternalVulkanHeaders
 	GIT_REPOSITORY		https://github.com/KhronosGroup/Vulkan-Headers.git
-	GIT_TAG				"v1.1.115"
+	GIT_TAG				"v1.1.108"
 	SOURCE_DIR			"external/Vulkan-Headers"
 )
 	
@@ -45,54 +46,55 @@ if (NOT ExternalVulkanHeaders_POPULATED)
 endif ()
 	
 add_library( "Vulkan-lib" INTERFACE )
+add_dependencies( "Vulkan-lib" ExternalVulkanHeaders )
 target_include_directories( "Vulkan-lib" INTERFACE "external/Vulkan-Headers/include" )
 target_compile_definitions( "Vulkan-lib" INTERFACE "" )
 
 #==============================================================================
-# Interceptor
+# Sync analyzer
 
 file( GLOB_RECURSE SOURCES "src/*.*" )
-message( STATUS "SOURCES: ${SOURCES}" )
-add_executable( "VkInterceptor" ${SOURCES} )
-set_property( TARGET "VkInterceptor" PROPERTY FOLDER "" )
+add_library( ${PROJECT_NAME} SHARED ${SOURCES} )
+set_property( TARGET ${PROJECT_NAME} PROPERTY FOLDER "" )
 source_group( TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${SOURCES} )
+target_link_libraries( ${PROJECT_NAME} "Vulkan-lib" )
 
 # Debug
 if (PROJECTS_SHARED_CXX_FLAGS_DEBUG)
-	target_compile_options( "VkInterceptor" PUBLIC $<$<CONFIG:Debug>: ${PROJECTS_SHARED_CXX_FLAGS_DEBUG}> )
+	target_compile_options( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Debug>: ${PROJECTS_SHARED_CXX_FLAGS_DEBUG}> )
 endif()
 if (PROJECTS_SHARED_DEFINES_DEBUG)
-	target_compile_definitions( "VkInterceptor" PUBLIC $<$<CONFIG:Debug>: ${PROJECTS_SHARED_DEFINES_DEBUG}> )
+	target_compile_definitions( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Debug>: ${PROJECTS_SHARED_DEFINES_DEBUG}> )
 endif()
 if (PROJECTS_SHARED_LINKER_FLAGS_DEBUG)
-	set_target_properties( "VkInterceptor" PROPERTIES LINK_FLAGS_DEBUG ${PROJECTS_SHARED_LINKER_FLAGS_DEBUG} )
+	set_target_properties( ${PROJECT_NAME} PROPERTIES LINK_FLAGS_DEBUG ${PROJECTS_SHARED_LINKER_FLAGS_DEBUG} )
 endif()
 
 # Release
 if (PROJECTS_SHARED_CXX_FLAGS_RELEASE)
-	target_compile_options( "VkInterceptor" PUBLIC $<$<CONFIG:Release>: ${PROJECTS_SHARED_CXX_FLAGS_RELEASE}> )
+	target_compile_options( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Release>: ${PROJECTS_SHARED_CXX_FLAGS_RELEASE}> )
 endif()
 if (PROJECTS_SHARED_DEFINES_RELEASE)
-	target_compile_definitions( "VkInterceptor" PUBLIC $<$<CONFIG:Release>: ${PROJECTS_SHARED_DEFINES_RELEASE}> )
+	target_compile_definitions( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Release>: ${PROJECTS_SHARED_DEFINES_RELEASE}> )
 endif()
 if (PROJECTS_SHARED_LINKER_FLAGS_RELEASE)
-	set_target_properties( "VkInterceptor" PROPERTIES LINK_FLAGS_RELEASE ${PROJECTS_SHARED_LINKER_FLAGS_RELEASE} )
+	set_target_properties( ${PROJECT_NAME} PROPERTIES LINK_FLAGS_RELEASE ${PROJECTS_SHARED_LINKER_FLAGS_RELEASE} )
 endif()
 
 # Profile
 if (PROJECTS_SHARED_DEFINES_PROFILE)
-	target_compile_definitions( "VkInterceptor" PUBLIC $<$<CONFIG:Profile>: ${PROJECTS_SHARED_DEFINES_PROFILE}> )
+	target_compile_definitions( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Profile>: ${PROJECTS_SHARED_DEFINES_PROFILE}> )
 endif()
 if (PROJECTS_SHARED_LINKER_FLAGS_PROFILE)
-	set_target_properties( "VkInterceptor" PROPERTIES LINK_FLAGS_PROFILE ${PROJECTS_SHARED_LINKER_FLAGS_PROFILE} )
+	set_target_properties( ${PROJECT_NAME} PROPERTIES LINK_FLAGS_PROFILE ${PROJECTS_SHARED_LINKER_FLAGS_PROFILE} )
 endif()
 if (PROJECTS_SHARED_CXX_FLAGS_PROFILE)
-	target_compile_options( "VkInterceptor" PUBLIC $<$<CONFIG:Profile>: ${PROJECTS_SHARED_CXX_FLAGS_PROFILE}> )
+	target_compile_options( ${PROJECT_NAME} PUBLIC $<$<CONFIG:Profile>: ${PROJECTS_SHARED_CXX_FLAGS_PROFILE}> )
 endif()
 
-set_target_properties( "VkInterceptor" PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES )
+set_target_properties( ${PROJECT_NAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES )
 
 #==============================================================================
 
-message( STATUS "project 'VkInterceptor' generation ended" )
+message( STATUS "project '${PROJECT_NAME}' generation ended" )
 message( STATUS "\n==========================================================================" )
