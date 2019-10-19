@@ -1,6 +1,6 @@
 cmake_minimum_required( VERSION 3.11 FATAL_ERROR )
 
-project( "vkSyncAnalyzer" LANGUAGES C CXX )
+project( "VkLayer_sync_analyzer" LANGUAGES C CXX )
 
 message( STATUS "==========================================================================\n" )
 message( STATUS "project '${PROJECT_NAME}' generation started" )
@@ -31,12 +31,18 @@ else()
 endif()
 
 #==============================================================================
+# Graphviz
+
+set( VSA_ENABLE_GRAPHVIZ ON CACHE BOOL "use graphviz (optional)" )
+include( "cmake/graphviz.cmake" )
+
+#==============================================================================
 # Vulkan
 
 FetchContent_Declare( ExternalVulkanHeaders
 	GIT_REPOSITORY		https://github.com/KhronosGroup/Vulkan-Headers.git
 	GIT_TAG				"v1.1.108"
-	SOURCE_DIR			"external/Vulkan-Headers"
+	SOURCE_DIR			"${CMAKE_CURRENT_SOURCE_DIR}/external/Vulkan-Headers"
 )
 	
 FetchContent_GetProperties( ExternalVulkanHeaders )
@@ -48,7 +54,10 @@ endif ()
 add_library( "Vulkan-lib" INTERFACE )
 add_dependencies( "Vulkan-lib" ExternalVulkanHeaders )
 target_include_directories( "Vulkan-lib" INTERFACE "external/Vulkan-Headers/include" )
-target_compile_definitions( "Vulkan-lib" INTERFACE "" )
+
+if (WIN32)
+	target_compile_definitions( "Vulkan-lib" INTERFACE "VK_USE_PLATFORM_WIN32_KHR=1" )
+endif ()
 
 #==============================================================================
 # Sync analyzer
@@ -95,6 +104,20 @@ if (PROJECTS_SHARED_CXX_FLAGS_PROFILE)
 endif()
 
 set_target_properties( ${PROJECT_NAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES )
+
+if (${VSA_ENABLE_GRAPHVIZ})
+	target_link_libraries( ${PROJECT_NAME} "GraphViz-lib" )
+endif ()
+
+#==============================================================================
+# Copy json
+
+add_custom_command(
+	TARGET ${PROJECT_NAME} POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/VK_LAYER_AZ_sync_analyzer.json"
+		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/VK_LAYER_AZ_sync_analyzer.json"
+	VERBATIM )
 
 #==============================================================================
 

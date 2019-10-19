@@ -6,7 +6,7 @@
         "library_path": ".\\VkLayer_sync_analyzer.dll",
         "api_version": "1.1.108",
         "implementation_version": "1",
-        "description": "Synchronization analyzer capture layer",
+        "description": "sync analysis layer",
         "disable_environment": { "DISABLE_VK_LAYER_AZ_sync_analyzer_1": "1" },
 		"enable_environment": { "ENABLE_VK_LAYER_AZ_sync_analyzer_1": "1" }
     }
