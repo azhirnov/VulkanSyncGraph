@@ -54,10 +54,12 @@ target_compile_definitions( "Vulkan-lib" INTERFACE "" )
 # Sync analyzer
 
 file( GLOB_RECURSE SOURCES "src/*.*" )
-add_library( ${PROJECT_NAME} SHARED ${SOURCES} )
+file( GLOB_RECURSE STL_SOURCES "stl/*.*" )
+add_library( ${PROJECT_NAME} SHARED ${SOURCES} ${STL_SOURCES} )
 set_property( TARGET ${PROJECT_NAME} PROPERTY FOLDER "" )
-source_group( TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${SOURCES} )
+source_group( TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${SOURCES} ${STL_SOURCES} )
 target_link_libraries( ${PROJECT_NAME} "Vulkan-lib" )
+target_include_directories( ${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} )
 
 # Debug
 if (PROJECTS_SHARED_CXX_FLAGS_DEBUG)
