@@ -1,5 +1,5 @@
 # Vulkan Sync Graph
-[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](paypal.me/azhirnovgithub)<br/>
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://paypal.me/azhirnovgithub)<br/>
 
 
 ## Suported Platforms
