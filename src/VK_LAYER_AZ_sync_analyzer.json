@@ -3,7 +3,7 @@
     "layer" : {
         "name": "VK_LAYER_AZ_sync_analyzer",
         "type": "GLOBAL",
-        "library_path": ".\\VkLayer_sync_analyzer.dll",
+        "library_path": ".\\VK_LAYER_AZ_sync_analyzer.dll",
         "api_version": "1.1.108",
         "implementation_version": "1",
         "description": "sync analysis layer",

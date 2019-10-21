@@ -1,6 +1,6 @@
 cmake_minimum_required( VERSION 3.11 FATAL_ERROR )
 
-project( "VkLayer_sync_analyzer" LANGUAGES C CXX )
+project( "VK_LAYER_AZ_sync_analyzer" LANGUAGES C CXX )
 
 message( STATUS "==========================================================================\n" )
 message( STATUS "project '${PROJECT_NAME}' generation started" )
@@ -58,6 +58,7 @@ target_include_directories( "Vulkan-lib" INTERFACE "external/Vulkan-Headers/incl
 if (WIN32)
 	target_compile_definitions( "Vulkan-lib" INTERFACE "VK_USE_PLATFORM_WIN32_KHR=1" )
 endif ()
+target_compile_definitions( "Vulkan-lib" INTERFACE "VK_NO_PROTOTYPES=1" )
 
 #==============================================================================
 # Sync analyzer
@@ -69,6 +70,7 @@ set_property( TARGET ${PROJECT_NAME} PROPERTY FOLDER "" )
 source_group( TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${SOURCES} ${STL_SOURCES} )
 target_link_libraries( ${PROJECT_NAME} "Vulkan-lib" )
 target_include_directories( ${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} )
+target_compile_definitions( ${PROJECT_NAME} PUBLIC "VSA_LAYER_NAME=\"${PROJECT_NAME}\"" )
 
 # Debug
 if (PROJECTS_SHARED_CXX_FLAGS_DEBUG)
@@ -115,8 +117,8 @@ endif ()
 add_custom_command(
 	TARGET ${PROJECT_NAME} POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-		"${CMAKE_CURRENT_SOURCE_DIR}/src/VK_LAYER_AZ_sync_analyzer.json"
-		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/VK_LAYER_AZ_sync_analyzer.json"
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/${PROJECT_NAME}.json"
+		"$<TARGET_FILE_DIR:${PROJECT_NAME}>/${PROJECT_NAME}.json"
 	VERBATIM )
 
 #==============================================================================

@@ -24,7 +24,7 @@
 #undef DeleteFile
 #undef CreateWindow
 #undef CreateDirectory
-#undef min
-#undef max
+#undef CreateEvent
+#undef CreateSemaphore
 
 #endif	// PLATFORM_WINDOWS

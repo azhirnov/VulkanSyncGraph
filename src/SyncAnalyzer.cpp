@@ -13,8 +13,8 @@
 # endif
 
 #include "src/SyncAnalyzer.h"
-#include "stl/Containers/ArrayView.h"
 #include "stl/Algorithms/StringUtils.h"
+#include "stl/Containers/ArrayView.h"
 #include "stl/Stream/FileStream.h"
 
 #include <filesystem>
@@ -24,6 +24,29 @@ namespace VSA
 	
 /*
 =================================================
+	OnCreateDevice
+=================================================
+*/
+	void SyncAnalyzer::OnCreateDevice (VkInstance inst, VkPhysicalDevice pd, VkDevice ld,
+									   PFN_vkGetInstanceProcAddr gipa, PFN_vkGetDeviceProcAddr)
+	{
+		EXLOCK( _lock );
+
+		auto	get_queue_family_props = BitCast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>( gipa( inst, "vkGetPhysicalDeviceQueueFamilyProperties" ));
+		if ( not get_queue_family_props )
+			return;
+
+		auto&	dev		= _devices[ ld ];
+		uint	count	= uint(dev.queue_props.size());
+
+		get_queue_family_props( pd, INOUT &count, null );	// to shutup validation warnings
+
+		dev.queue_props.resize( count );
+		get_queue_family_props( pd, INOUT &count, OUT dev.queue_props.data() );
+	}
+
+/*
+=================================================
 	Start
 =================================================
 */
@@ -31,6 +54,7 @@ namespace VSA
 	{
 		_enabled	= true;
 		_startTime	= TimePoint_t::clock::now();
+		_Clear();
 	}
 	
 /*
@@ -40,7 +64,8 @@ namespace VSA
 */
 	void SyncAnalyzer::Stop ()
 	{
-		_SaveDotFile();
+		_SaveDotFile_v1();
+		//_SaveDotFile_v2();
 		_Clear();
 		_enabled = false;
 	}
@@ -53,6 +78,10 @@ namespace VSA
 	void SyncAnalyzer::_Clear ()
 	{
 		_globalSyncs.clear();
+		_signalSemaphores.clear();
+		_signalFences.clear();
+		_swapchains.clear();
+		_uidCounter = 0;
 	}
 
 /*
@@ -74,7 +103,7 @@ namespace VSA
 		PWSTR		w_name;
 		HRESULT		hr		= ::GetThreadDescription( ::GetCurrentThread(), OUT &w_name );	// Win10 only	// TODO: use dynamic linking
 
-		if ( SUCCEEDED(hr) )
+		if ( SUCCEEDED(hr) and w_name and *w_name )
 		{
 			String	name;
 			name.reserve( 128 );
@@ -86,6 +115,11 @@ namespace VSA
 
 			_threadNames.insert_or_assign( tid, std::move(name) );
 		}
+		else
+		{
+			_threadNames.insert_or_assign( tid, "Thread_"s << ToString( uint(tid) ));
+		}
+
 		return _threadIds.insert_or_assign( id, tid ).first->second;
 	}
 	
@@ -109,6 +143,29 @@ namespace VSA
 	{
 		return UID{ ++_uidCounter };
 	}
+	
+/*
+=================================================
+	DefaultQueueName
+=================================================
+*/
+	ND_ static String  DefaultQueueName (const VkQueueFamilyProperties &props, uint queueIndex)
+	{
+		String	str;
+
+		if ( EnumEq( props.queueFlags, VK_QUEUE_GRAPHICS_BIT ) )
+			str = "Graphics_";
+		else
+		if ( EnumEq( props.queueFlags, VK_QUEUE_COMPUTE_BIT ) )
+			str = "Compute_";
+		else
+		if ( EnumEq( props.queueFlags, VK_QUEUE_TRANSFER_BIT ) )
+			str = "Transfer_";
+		else
+			str = "Queue_";
+		
+		return str << ToString( queueIndex );
+	}
 
 /*
 =================================================
@@ -121,6 +178,9 @@ namespace VSA
 		uint32_t                                    queueIndex,
 		VkQueue*                                    pQueue)
 	{
+		if ( not pQueue or not *pQueue )
+			return;
+
 		EXLOCK( _lock );
 
 		auto&	d = _devices[ device ];
@@ -131,6 +191,7 @@ namespace VSA
 		q.dev				= device;
 		q.queueFamilyIndex	= queueFamilyIndex;
 		q.queueIndex		= queueIndex;
+		q.name				= DefaultQueueName( d.queue_props[q.queueFamilyIndex], q.queueIndex );
 	}
 
 /*
@@ -143,6 +204,9 @@ namespace VSA
 		const VkDeviceQueueInfo2*                   pQueueInfo,
 		VkQueue*                                    pQueue)
 	{
+		if ( not pQueue or not *pQueue )
+			return;
+
 		EXLOCK( _lock );
 
 		auto&	d = _devices[ device ];
@@ -153,6 +217,7 @@ namespace VSA
 		q.dev				= device;
 		q.queueFamilyIndex	= pQueueInfo->queueFamilyIndex;
 		q.queueIndex		= pQueueInfo->queueIndex;
+		q.name				= DefaultQueueName( d.queue_props[q.queueFamilyIndex], q.queueIndex );
 	}
 
 /*
@@ -360,7 +425,7 @@ namespace VSA
 =================================================
 */
 	void SyncAnalyzer::vki_ResetFences(
-		VkDevice                                    device,
+		VkDevice                                    ,
 		uint32_t                                    fenceCount,
 		const VkFence*                              pFences,
 		VkResult                                    result)
@@ -377,6 +442,41 @@ namespace VSA
 			_signalFences.erase( pFences[i] );
 		}
 	}
+	
+/*
+=================================================
+	vki_GetFenceStatus
+=================================================
+*/
+	void SyncAnalyzer::vki_GetFenceStatus(
+		VkDevice                                    device,
+		VkFence                                     fence,
+		VkResult                                    result)
+	{
+		if ( not (result == VK_SUCCESS or result == VK_TIMEOUT) )
+			return;
+
+		EXLOCK( _lock );
+		
+		if ( not _enabled )
+			return;
+
+		WaitForFences	cmd;
+		cmd.threadId	= _GetThreadID();
+		cmd.time		= _GetTimePoint();
+		cmd.dev			= device;
+		cmd.uid			= _GetUID();
+		cmd.waitForAll	= true;
+		cmd.timeout		= result == VK_TIMEOUT;
+		cmd.fences.push_back( fence );
+		
+		{
+			auto& arr = _signalFences[ fence ];
+			cmd.fenceDeps.insert( cmd.fenceDeps.end(), arr.begin(), arr.end() );
+		}
+
+		_globalSyncs.push_back( cmd );
+	}
 
 /*
 =================================================
@@ -388,7 +488,7 @@ namespace VSA
 		uint32_t                                    fenceCount,
 		const VkFence*                              pFences,
 		VkBool32                                    waitAll,
-		uint64_t                                    timeout,
+		uint64_t                                    ,
 		VkResult                                    result)
 	{
 		if ( not (result == VK_SUCCESS or result == VK_TIMEOUT) )
@@ -411,7 +511,6 @@ namespace VSA
 		for (uint i = 0; i < fenceCount; ++i)
 		{
 			auto& arr = _signalFences[ pFences[i] ];
-			ASSERT( arr.size() );
 			cmd.fenceDeps.insert( cmd.fenceDeps.end(), arr.begin(), arr.end() );
 		}
 
@@ -426,7 +525,7 @@ namespace VSA
 	void SyncAnalyzer::vki_AcquireNextImageKHR(
 		VkDevice                                    device,
 		VkSwapchainKHR                              swapchain,
-		uint64_t                                    timeout,
+		uint64_t                                    ,
 		VkSemaphore                                 semaphore,
 		VkFence                                     fence,
 		uint32_t*                                   pImageIndex,
@@ -454,6 +553,12 @@ namespace VSA
 
 		if ( fence )
 			_signalFences[ fence ].push_back( cmd.uid );
+
+		{
+			auto&	sw = _swapchains[ swapchain ];
+			sw.resize( Max( sw.size(), *pImageIndex + 1 ));
+			sw[ *pImageIndex ] = cmd.uid;
+		}
 
 		_globalSyncs.push_back( cmd );
 	}
@@ -491,6 +596,12 @@ namespace VSA
 
 		if ( pAcquireInfo->fence )
 			_signalFences[ pAcquireInfo->fence ].push_back( cmd.uid );
+		
+		{
+			auto&	sw = _swapchains[ pAcquireInfo->swapchain ];
+			sw.resize( Max( sw.size(), *pImageIndex + 1 ));
+			sw[ *pImageIndex ] = cmd.uid;
+		}
 
 		_globalSyncs.push_back( cmd );
 	}
@@ -519,7 +630,6 @@ namespace VSA
 		cmd.dev			= _queues[queue].dev;
 		cmd.uid			= _GetUID();
 		cmd.queue		= queue;
-		cmd.swapchains.assign( pPresentInfo->pSwapchains, pPresentInfo->pSwapchains + pPresentInfo->swapchainCount );
 		cmd.waitSemaphores.assign( pPresentInfo->pWaitSemaphores, pPresentInfo->pWaitSemaphores + pPresentInfo->waitSemaphoreCount );
 		
 		for (uint j = 0; j < pPresentInfo->waitSemaphoreCount; ++j)
@@ -531,6 +641,17 @@ namespace VSA
 			{
 				cmd.waitDeps.push_back( iter->second );
 				_signalSemaphores.erase( iter );
+			}
+		}
+
+		for (uint i = 0; i < pPresentInfo->swapchainCount; ++i)
+		{
+			auto	iter = _swapchains.find( pPresentInfo->pSwapchains[i] );
+			ASSERT( iter != _swapchains.end() );
+
+			if ( iter != _swapchains.end() and pPresentInfo->pImageIndices[i] < iter->second.size() )
+			{
+				cmd.swapchains.emplace_back( pPresentInfo->pSwapchains[i], iter->second[ pPresentInfo->pImageIndices[i] ] );
 			}
 		}
 
@@ -586,50 +707,10 @@ namespace VSA
 		}
 		return str;
 	}
-
-/*
-=================================================
-	
-=================================================
-*/
-	String  SyncAnalyzer::_ToCpuNodeName (UID id)
-	{
-		return "cn_"s << ToString( uint(id) );
-	}
-
-	String  SyncAnalyzer::_ToGpuNodeName (UID id)
-	{
-		return "gn_"s << ToString( uint(id) );
-	}
-	
-	String  SyncAnalyzer::_ToNodeStyle (StringView name, const NodeStyle &style)
-	{
-		return String()
-			<< " [label=\"" << name << '"'
-			<< ", fontcolor=\"#" << ColToStr( style.labelColor ) << '"'
-			<< (style.fontSize ? ", fontsize="s << ToString( style.fontSize ) : "")
-			<< ", fillcolor=\"#" << ColToStr( style.bgColor ) << '"'
-			<< ", style=filled];\n";
-	}
-	
-	String  SyncAnalyzer::_MakeSemaphoreEdge (UID from, UID to)
-	{
-		return _ToGpuNodeName( from ) << ":e -> " << _ToGpuNodeName( to ) << ":w [color=\"#" << ColToStr( HtmlColor::Orange ) << "\"];\n";
-	}
-
-	String  SyncAnalyzer::_MakeCpuToGpuSyncEdge (UID fromCpu, UID toGpu)
-	{
-		return _ToCpuNodeName( fromCpu ) << " -> " << _ToGpuNodeName( toGpu ) << " [color=\"#" << ColToStr( HtmlColor::Blue ) << "\"];\n";
-	}
-	
-	String  SyncAnalyzer::_MakeGpuToCpuSyncEdge (UID fromGpu, UID toCpu)
-	{
-		return _ToGpuNodeName( fromGpu ) << " -> " << _ToCpuNodeName( toCpu ) << " [color=\"#" << ColToStr( HtmlColor::Red ) << "\"];\n";
-	}
 	
 /*
 =================================================
-	
+	_QueueName
 =================================================
 */
 	String  SyncAnalyzer::_QueueName (VkQueue q) const
@@ -641,7 +722,12 @@ namespace VSA
 		
 		return ToString( uint64_t(q) );
 	}
-
+	
+/*
+=================================================
+	_ThreadName
+=================================================
+*/
 	String  SyncAnalyzer::_ThreadName (ThreadID tid) const
 	{
 		auto	iter = _threadNames.find( tid );
@@ -651,19 +737,127 @@ namespace VSA
 
 		return ToString( uint(tid) );
 	}
+//-----------------------------------------------------------------------------
+
 
 /*
 =================================================
-	_SaveDotFile
+	V1
 =================================================
 */
-	bool SyncAnalyzer::_SaveDotFile () const
+	String  SyncAnalyzer::V1::_ToCpuNodeName (UID id)
+	{
+		return "cn_"s << ToString( uint(id) );
+	}
+
+	String  SyncAnalyzer::V1::_ToGpuNodeName (UID id)
+	{
+		return "gn_"s << ToString( uint(id) );
+	}
+	
+	String  SyncAnalyzer::V1::_ToThreadNodeName (ThreadID id)
+	{
+		return "tid_"s << ToString( uint(id) );
+	}
+	
+	String  SyncAnalyzer::V1::_ToQueueNodeName (VkQueue id)
+	{
+		return "queue_"s << ToString( uint64_t(id) );
+	}
+
+	String  SyncAnalyzer::V1::_ToNodeStyle (StringView name, const NodeStyle &style)
+	{
+		return String()
+			<< " [label=\"" << name << '"'
+			<< ", fontcolor=\"#" << ColToStr( style.labelColor ) << '"'
+			<< (style.fontSize ? ", fontsize="s << ToString( style.fontSize ) : "")
+			<< ", fillcolor=\"#" << ColToStr( style.bgColor ) << '"'
+			<< ", style=filled];\n";
+	}
+	
+	String  SyncAnalyzer::V1::_AcquirePresentNodeStyle (StringView name)
+	{
+		NodeStyle	style;
+		style.bgColor		= HtmlColor::Lime;
+		style.labelColor	= HtmlColor::Black;
+		return V1::_ToNodeStyle( name, style );
+	}
+
+	String  SyncAnalyzer::V1::_WaitOnHostNodeStyle (StringView name)
+	{
+		NodeStyle	style;
+		style.bgColor		= HtmlColor::Red;
+		style.labelColor	= HtmlColor::White;
+		return V1::_ToNodeStyle( name, style );
+	}
+
+	String  SyncAnalyzer::V1::_SubmitNodeStyle (StringView name)
+	{
+		NodeStyle	style;
+		style.bgColor		= HtmlColor::Blue;
+		style.labelColor	= HtmlColor::White;
+		return V1::_ToNodeStyle( name, style );
+	}
+
+	String  SyncAnalyzer::V1::_CmdBatchNodeStyle (StringView name)
+	{
+		NodeStyle	style;
+		style.bgColor		= HtmlColor::DarkSlateGray;
+		style.labelColor	= HtmlColor::Gainsboro;
+		return V1::_ToNodeStyle( name, style );
+	}
+
+	String  SyncAnalyzer::V1::_FenceNodeStyle (StringView name)
+	{
+		NodeStyle	style;
+		style.bgColor		= HtmlColor::Gold;
+		style.labelColor	= HtmlColor::Black;
+		style.fontSize		= 8;
+		return String()
+			<< " [label=\"" << name << '"'
+			<< ", fontcolor=\"#" << ColToStr( style.labelColor ) << '"'
+			<< (style.fontSize ? ", fontsize="s << ToString( style.fontSize ) : "")
+			<< ", fillcolor=\"#" << ColToStr( style.bgColor ) << '"'
+			<< ", style=filled"
+			<< ", margin=0, nojustify=true];\n";
+	}
+
+	String  SyncAnalyzer::V1::_MakeSemaphoreEdge (UID from, UID to)
+	{
+		return V1::_ToGpuNodeName( from ) << ":e -> " << V1::_ToGpuNodeName( to ) << ":w [color=\"#" << ColToStr( HtmlColor::Orange ) << "\"];\n";
+	}
+	
+	String  SyncAnalyzer::V1::_MakeSwapchainEdge (UID from, UID to)
+	{
+		return V1::_ToGpuNodeName( from ) << ":e -> " << V1::_ToGpuNodeName( to ) << ":w [color=\"#" << ColToStr( HtmlColor::Lime ) << "\"];\n";
+	}
+
+	String  SyncAnalyzer::V1::_MakeCpuToGpuSyncEdge (UID fromCpu, UID toGpu)
+	{
+		return V1::_ToCpuNodeName( fromCpu ) << " -> " << V1::_ToGpuNodeName( toGpu ) << " [color=\"#" << ColToStr( HtmlColor::DeepSkyBlue ) << "\", minlen=2];\n";
+	}
+	
+	String  SyncAnalyzer::V1::_MakeGpuToCpuSyncEdge (UID fromGpu, UID toCpu)
+	{
+		return V1::_ToGpuNodeName( fromGpu ) << " -> " << V1::_ToCpuNodeName( toCpu ) << " [color=\"#" << ColToStr( HtmlColor::Red ) << "\", minlen=2];\n";
+	}
+	
+	String  SyncAnalyzer::V1::_MakeStrongHiddenEdge (StringView from, StringView to)
+	{
+		return String(from) << " -> " << to << " [minlen=0, style=invis];\n";
+	}
+
+/*
+=================================================
+	_SaveDotFile_v1
+=================================================
+*/
+	bool SyncAnalyzer::_SaveDotFile_v1 () const
 	{
 		String	str;
 		str << "digraph SyncAnalyzer {\n"
 			<< "	rankdir = LR;\n"
 			<< "	bgcolor = black;\n"
-			//<< "	concentrate=true;\n"
 			<< "	compound=true;\n\n";
 
 		String	rank_decl;
@@ -689,12 +883,12 @@ namespace VSA
 			String	str;
 			auto	iter = active_threads.find( tid );
 			if ( iter != active_threads.end() ) {
-				str << _ToCpuNodeName( iter->second ) << ":e -> " << _ToCpuNodeName( id ) << ":w";
+				str << V1::_ToCpuNodeName( iter->second ) << ":e -> " << V1::_ToCpuNodeName( id ) << ":w";
 			} else {
-				str << "tid_" << ToString( uint(tid) ) << ":e -> " << _ToCpuNodeName( id ) << ":w";
+				str << V1::_ToThreadNodeName( tid ) << ":e -> " << V1::_ToCpuNodeName( id ) << ":w";
 			}
 			active_threads.insert_or_assign( tid, id );
-			return str << " [color=\"#d3d3d3\", style=dotted];\n";
+			return str << " [color=\"#" << ColToStr( HtmlColor::DeepSkyBlue ) << "\", style=dotted, penwidth=2];\n";
 		};
 
 		HashMap<VkQueue, UID>	active_queues;
@@ -703,170 +897,159 @@ namespace VSA
 			String	str;
 			auto	iter = active_queues.find( queue );
 			if ( iter != active_queues.end() ) {
-				str << _ToGpuNodeName( iter->second ) << ":e -> " << _ToGpuNodeName( id ) << ":w";
+				str << V1::_ToGpuNodeName( iter->second ) << ":e -> " << V1::_ToGpuNodeName( id ) << ":w";
 			} else {
-				str << "queue_" << ToString( uint64_t(queue) ) << ":e -> " << _ToGpuNodeName( id ) << ":w";
+				str << V1::_ToQueueNodeName( queue ) << ":e -> " << V1::_ToGpuNodeName( id ) << ":w";
 			}
 			active_queues.insert_or_assign( queue, id );
-			return str << " [color=\"#d3d3d3\", style=dotted];\n";
+			return str << " [color=\"#" << ColToStr( HtmlColor::DarkGreen ) << "\", style=dotted, penwidth=2];\n";
 		};
 			
 		for (auto& sync : _globalSyncs)
 		{
 			Visit( sync,
 				[&] (const QueueSubmit& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Blue;
-					style.labelColor	= HtmlColor::White;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Submit", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_SubmitNodeStyle( "Submit" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId );
 
 					for (auto& batch : sync.batches) {
-						deps << "\t" << _MakeCpuToGpuSyncEdge( sync.uid, batch );
+						deps << "\t" << V1::_MakeCpuToGpuSyncEdge( sync.uid, batch );
 					}
 				},
 
 				[&] (const CmdBatch& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::DarkSlateGray;
-					style.labelColor	= HtmlColor::Gainsboro;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToGpuNodeName( sync.uid ) << _ToNodeStyle( "CmdBatch", style );
+					rank<< "\t\t" << V1::_ToGpuNodeName( sync.uid ) << V1::_CmdBatchNodeStyle( "CmdBatch" );
 					deps<< "\t" << make_gpu_timeline( sync.uid, sync.queue );
 
 					for (auto& sem : sync.waitDeps) {
-						deps << "\t" << _MakeSemaphoreEdge( sem, sync.uid );
+						deps << "\t" << V1::_MakeSemaphoreEdge( sem, sync.uid );
 					}
 				},
 
 				[&] (const FenceSignal& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Gold;
-					style.labelColor	= HtmlColor::Black;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToGpuNodeName( sync.uid ) << _ToNodeStyle( "Fence", style );
-					deps<< "\t" << make_gpu_timeline( sync.uid, sync.queue );
+					rank<< "\t\t" << V1::_ToGpuNodeName( sync.uid ) << V1::_FenceNodeStyle( "Fence" );
 
 					for (auto& batch : sync.dependsOn) {
-						deps << "\t" << _MakeSemaphoreEdge( batch, sync.uid );
+						deps << "\t" << V1::_MakeSemaphoreEdge( batch, sync.uid );
 					}
 				},
 
 				[&] (const QueueWaitIdle& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Red;
-					style.labelColor	= HtmlColor::White;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Wait", style )
-						<< "\t\t" << _ToGpuNodeName( sync.uid ) << _ToNodeStyle( "Wait", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_WaitOnHostNodeStyle( "Wait" )
+						<< "\t\t" << V1::_ToGpuNodeName( sync.uid ) << V1::_WaitOnHostNodeStyle( "Wait" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId )
 						<< "\t" << make_gpu_timeline( sync.uid, sync.queue )
-						<< "\t" << _MakeGpuToCpuSyncEdge( sync.uid, sync.uid );
+						<< "\t" << V1::_MakeGpuToCpuSyncEdge( sync.uid, sync.uid );
 				},
 
 				[&] (const DeviceWaitIdle& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Red;
-					style.labelColor	= HtmlColor::White;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Wait", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_WaitOnHostNodeStyle( "Wait" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId );
 					// TODO: insert node to all queues
 				},
 
 				[&] (const WaitForFences& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Red;
-					style.labelColor	= HtmlColor::White;
+					if ( sync.timeout )
+						return;
 
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Wait", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_WaitOnHostNodeStyle( "Wait" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId );
 
 					for (auto& fence : sync.fenceDeps) {
-						deps << "\t" << _MakeGpuToCpuSyncEdge( fence, sync.uid );
+						deps << "\t" << V1::_MakeGpuToCpuSyncEdge( fence, sync.uid );
 					}
 				},
 
 				[&] (const AcquireImage& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Lime;
-					style.labelColor	= HtmlColor::Black;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Acquire", style )
-						<< "\t\t" << _ToGpuNodeName( sync.uid ) << _ToNodeStyle( "Acquire", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_AcquirePresentNodeStyle( "Acquire" )
+						<< "\t\t" << V1::_ToGpuNodeName( sync.uid ) << V1::_AcquirePresentNodeStyle( "Acquire" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId )
-						<< "\t" << _MakeCpuToGpuSyncEdge( sync.uid, sync.uid );
+						<< "\t" << V1::_MakeCpuToGpuSyncEdge( sync.uid, sync.uid );
 				},
 
 				[&] (const QueuePresent& sync) {
-					NodeStyle	style;
-					style.bgColor		= HtmlColor::Lime;
-					style.labelColor	= HtmlColor::Black;
-
 					add_rank( sync.time );
-					rank<< "\t\t" << _ToCpuNodeName( sync.uid ) << _ToNodeStyle( "Present", style )
-						<< "\t\t" << _ToGpuNodeName( sync.uid ) << _ToNodeStyle( "Present", style );
+					rank<< "\t\t" << V1::_ToCpuNodeName( sync.uid ) << V1::_AcquirePresentNodeStyle( "Present" )
+						<< "\t\t" << V1::_ToGpuNodeName( sync.uid ) << V1::_AcquirePresentNodeStyle( "Present" );
 					deps<< "\t" << make_cpu_timeline( sync.uid, sync.threadId )
 						<< "\t" << make_gpu_timeline( sync.uid, sync.queue )
-						<< "\t" << _MakeCpuToGpuSyncEdge( sync.uid, sync.uid );
+						<< "\t" << V1::_MakeCpuToGpuSyncEdge( sync.uid, sync.uid );
 
+					for (auto&[sw, acq] : sync.swapchains) {
+						deps << "\t" << V1::_MakeSwapchainEdge( acq, sync.uid );
+					}
 					for (auto& sem : sync.waitDeps) {
-						deps << "\t" << _MakeSemaphoreEdge( sem, sync.uid );
+						deps << "\t" << V1::_MakeSemaphoreEdge( sem, sync.uid );
 					}
 				}
 			);
 		}
 
-		for (auto& item : active_threads)
 		{
-			NodeStyle	style;
-			style.bgColor		= HtmlColor::Indigo;
-			style.labelColor	= HtmlColor::White;
+			String	prev_thread;
+			for (auto& item : active_threads)
+			{
+				NodeStyle	style;
+				style.bgColor		= HtmlColor::Indigo;
+				style.labelColor	= HtmlColor::White;
 
-			rank_names	<< "\t\ttid_" << ToString( uint(item.first) )
-						<< _ToNodeStyle( _ThreadName( item.first ), style );
-		}
+				String		curr = V1::_ToThreadNodeName( item.first );
+				rank_names << "\t\t" << curr << V1::_ToNodeStyle( _ThreadName( item.first ), style );
 
-		for (auto& item : active_queues)
-		{
-			NodeStyle	style;
-			style.bgColor		= HtmlColor::DarkSlateGray;
-			style.labelColor	= HtmlColor::Gainsboro;
+				if ( prev_thread.size() )
+					deps << V1::_MakeStrongHiddenEdge( prev_thread, curr );
 
-			rank_names	<< "\t\tqueue_" << ToString( uint64_t(item.first) )
-						<< _ToNodeStyle( _QueueName( item.first ), style );
+				prev_thread = std::move(curr);
+			}
+		}{
+			String	prev_queue;
+			for (auto& item : active_queues)
+			{
+				NodeStyle	style;
+				style.bgColor		= HtmlColor::DarkSlateGray;
+				style.labelColor	= HtmlColor::Gainsboro;
+			
+				String		curr = V1::_ToQueueNodeName( item.first );
+				rank_names << "\t\t" << curr << V1::_ToNodeStyle( _QueueName( item.first ), style );
+			
+				if ( prev_queue.size() )
+					deps << V1::_MakeStrongHiddenEdge( prev_queue, curr );
+
+				prev_queue = std::move(curr);
+			}
 		}
 
 		if ( EndsWith( rank_decl, " -> " ) )
 			rank_decl.erase( rank_decl.size() - 4, 4 );
 
-		str	<< "\t{\n"
-			<< "\t\tnode [shape=plaintext, fontname=\"helvetica\", fontsize=5, fontcolor=white];\n\t\t"
-			<< rank_decl << ";\n"
-			<< "\t}\n\n"
-			<< "\t{\n"
-			<< "\t\trank = same; \"init\";\n"
-			<< "\t\tnode [shape=rectangle, fontname=\"helvetica\", penwidth=0.0];\n"
-			<< "\t\tedge [fontname=\"helvetica\", fontcolor=white, minlen=2];\n"
-			<< rank_names
-			<< "\t}\n\n"
-			<< "\tnode [shape=rectangle, fontname=\"helvetica\", penwidth=0.0];\n"
-			<< "\tedge [fontname=\"helvetica\", fontcolor=white, minlen=2];\n"
-			<< rank
-			<< "\t}\n\n"
-			<< deps
+		str	<< "	{\n"
+			<< "		node [shape=plaintext, fontname=\"helvetica\", fontsize=5, fontcolor=white];\n"
+			<< "		" << rank_decl << ";\n"
+			<< "	}\n\n"
+			<< "	{\n"
+			<< "		rank = same; \"init\";\n"
+			<< "		node [shape=rectangle, fontname=\"helvetica\", penwidth=0.0];\n"
+			<< "		edge [fontname=\"helvetica\", fontcolor=white, minlen=1];\n"
+			<<			rank_names
+			<< "	}\n\n"
+			<< "	node [shape=rectangle, fontname=\"helvetica\", penwidth=0.0];\n"
+			<< "	edge [fontname=\"helvetica\", fontcolor=white, minlen=1];\n"
+			<<		rank
+			<< "	}\n\n"
+			<<		deps
 			<< "}\n";
 
-		return _Visualize( str, "C:\\Projects\\sync_graph.dot", "png" );
+		return _Visualize( str, "C:\\Projects\\sync_graph_v1.dot", "png" );
 	}
+//-----------------------------------------------------------------------------
+
 	
 /*
 =================================================
@@ -907,7 +1090,6 @@ namespace VSA
 		DWORD process_exit;
 		::GetExitCodeProcess( proc_info.hProcess, OUT &process_exit );
 
-		//std::this_thread::sleep_for( std::chrono::milliseconds(1) );
 		return true;
 #	else
 		return false;
@@ -938,6 +1120,8 @@ namespace VSA
 			FileWStream		wfile{ path };
 			CHECK_ERR( wfile.IsOpen() );
 			CHECK_ERR( wfile.Write( graph ));
+
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": Dot-file saved into '"s << path << "'" );
 		}
 
 		// generate graph
@@ -950,6 +1134,8 @@ namespace VSA
 			}
 			
 			CHECK_ERR( Execute( "\""s << VSA_GRAPHVIZ_DOT_EXECUTABLE << "\" -T" << format << " -O " << path, 30'000 ));
+			
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": Graph saved into '"s << graph_path.string() << "'" );
 		}
 
 		return true;

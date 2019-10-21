@@ -11,7 +11,7 @@
 namespace VSA
 {
 	static const VkLayerProperties LayerProps = {
-		"VK_LAYER_AZ_sync_analyzer",
+		VSA_LAYER_NAME,
 		VK_MAKE_VERSION( 1, 0, VK_HEADER_VERSION ),
 		1,
 		"sync analysis layer",
@@ -76,6 +76,10 @@ namespace VSA
 		#ifdef VK_USE_PLATFORM_WIN32_KHR
 			_instFn.CreateWin32SurfaceKHR = BitCast<PFN_vkCreateWin32SurfaceKHR>(gpa( inst, "vkCreateWin32SurfaceKHR" ));
 		#endif
+		
+		for (auto& an : _analyzers) {
+			an->OnCreateInstance( _instance, _getInstanceProcAddr );
+		}
 	}
 
 /*
@@ -92,6 +96,10 @@ namespace VSA
 		#define VISITOR( _name_ )	_devFn._name_ = BitCast<PFN_vk ## _name_>(gpa( ld, "vk" #_name_ ));
 		DEVICE_FN_LIST( VISITOR )
 		#undef VISITOR
+			
+		for (auto& an : _analyzers) {
+			an->OnCreateDevice( _instance, _physicalDevice, _logicalDevice, _getInstanceProcAddr, _getDeviceProcAddr );
+		}
 	}
 	
 /*
@@ -120,6 +128,8 @@ namespace VSA
 		ADD_CB2( QueueWaitIdle );
 		ADD_CB2( DeviceWaitIdle );
 		ADD_CB2( QueueBindSparse );
+		ADD_CB2( ResetFences );
+		ADD_CB2( GetFenceStatus );
 		ADD_CB2( WaitForFences );
 		ADD_CB2( AcquireNextImageKHR );
 		ADD_CB2( AcquireNextImage2KHR );
@@ -359,7 +369,7 @@ namespace VSA
 			Call( iter->second->_fnTable.CreateInstance,
 				  MakeTuple( pCreateInfo, pAllocator, pInstance ), result );
 
-			VSA_LOGI( String(LayerProps.layerName) << ": CreateInstance" );
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": CreateInstance" );
 		}
 
 		return result;
@@ -429,7 +439,7 @@ namespace VSA
 		{
 			Call( layer->_fnTable.DestroyInstance, MakeTuple( instance, pAllocator ));
 			
-			VSA_LOGI( String(LayerProps.layerName) << ": DestroyInstance" );
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": DestroyInstance" );
 
 			layer->_instFn.DestroyInstance( instance, pAllocator );
 		}
@@ -600,7 +610,7 @@ namespace VSA
 			inst._deviceToLayer.insert_or_assign( *pDevice, layer );
 			layer->_Init2( physicalDevice, *pDevice, get_device_proc_addr );
 			
-			VSA_LOGI( String(LayerProps.layerName) << ": CreateDevice" );
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": CreateDevice" );
 		}
 
 		Call( layer->_fnTable.CreateDevice,
@@ -624,7 +634,7 @@ namespace VSA
 
 			layer->_devFn.DestroyDevice( device, pAllocator );
 			
-			VSA_LOGI( String(LayerProps.layerName) << ": DestroyDevice" );
+			VSA_LOGI( String(VSA_LAYER_NAME) << ": DestroyDevice" );
 
 			auto&	inst = Instance();
 			EXLOCK( inst._lock );
@@ -821,6 +831,28 @@ namespace VSA
 		return VK_RESULT_MAX_ENUM;
 	}
 	
+/*
+=================================================
+	vki_GetFenceStatus
+=================================================
+*/
+	VKAPI_ATTR VkResult VKAPI_CALL LayerManager::vki_GetFenceStatus(
+		VkDevice                                    device,
+		VkFence                                     fence)
+	{
+		if ( auto layer = Layer( device ) )
+		{
+			VkResult result = layer->_devFn.GetFenceStatus( device, fence );
+
+			Call( layer->_fnTable.GetFenceStatus, MakeTuple( device, fence ), result );
+
+			return result;
+		}
+
+		CHECK( false );
+		return VK_RESULT_MAX_ENUM;
+	}
+
 /*
 =================================================
 	vki_WaitForFences

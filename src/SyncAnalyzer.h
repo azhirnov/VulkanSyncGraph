@@ -2,12 +2,12 @@
 
 #pragma once
 
-#include "vulkan/vulkan.h"
 #include <thread>
 #include <mutex>
 
 #include "stl/Containers/Ptr.h"
 #include "stl/Containers/Union.h"
+#include "stl/Containers/FixedArray.h"
 #include "stl/Math/Color.h"
 
 #include "src/IAnalyzer.h"
@@ -82,8 +82,8 @@ namespace VSA
 		{
 			VkQueue					queue		= VK_NULL_HANDLE;
 			Array<VkSemaphore>		waitSemaphores;
-			Array<VkSwapchainKHR>	swapchains;
 			Array<UID>				waitDeps;
+			Array<Pair< VkSwapchainKHR, UID >>	swapchains;
 		};
 
 		using GlobalSyncs_t = Array< Union< QueueSubmit, CmdBatch, FenceSignal, QueueWaitIdle, DeviceWaitIdle, WaitForFences, AcquireImage, QueuePresent >>;
@@ -94,6 +94,7 @@ namespace VSA
 		{
 			VkDevice			id		= VK_NULL_HANDLE;
 			HashSet<VkQueue>	queues;
+			FixedArray<VkQueueFamilyProperties, 16>	queue_props;
 		};
 
 		struct QueueInfo
@@ -119,6 +120,7 @@ namespace VSA
 		
 		using SignalSemaphores_t= HashMap< VkSemaphore, UID >;
 		using SignalFences_t	= HashMap< VkFence, Array<UID> >;
+		using SwapchainDeps_t	= HashMap< VkSwapchainKHR, Array<UID> >;
 		
 		struct NodeStyle {
 			uint		fontSize	= 10;
@@ -136,6 +138,7 @@ namespace VSA
 		GlobalSyncs_t			_globalSyncs;
 		SignalSemaphores_t		_signalSemaphores;
 		SignalFences_t			_signalFences;
+		SwapchainDeps_t			_swapchains;
 
 		ThreadIDs_t				_threadIds;
 		ThreadNames_t			_threadNames;
@@ -149,6 +152,9 @@ namespace VSA
 	public:
 		SyncAnalyzer () {}
 		
+		void OnCreateDevice (VkInstance, VkPhysicalDevice, VkDevice,
+							 PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr) override;
+
 		void Start () override;
 		void Stop () override;
 
@@ -189,6 +195,11 @@ namespace VSA
 			VkDevice                                    device,
 			uint32_t                                    fenceCount,
 			const VkFence*                              pFences,
+			VkResult                                    result);
+		
+		void vki_GetFenceStatus(
+			VkDevice                                    device,
+			VkFence                                     fence,
 			VkResult                                    result);
 
 		void vki_WaitForFences(
@@ -237,14 +248,29 @@ namespace VSA
 		ND_ String  _QueueName (VkQueue q) const;
 		ND_ String  _ThreadName (ThreadID tid) const;
 		
-		static String  _ToCpuNodeName (UID id);
-		static String  _ToGpuNodeName (UID id);
-		static String  _ToNodeStyle (StringView name, const NodeStyle &style);
-		static String  _MakeSemaphoreEdge (UID from, UID to);
-		static String  _MakeCpuToGpuSyncEdge (UID fromCpu, UID toGpu);
-		static String  _MakeGpuToCpuSyncEdge (UID fromGpu, UID toCpu);
+		struct V1 {
+			static String  _ToCpuNodeName (UID id);
+			static String  _ToGpuNodeName (UID id);
+			static String  _ToThreadNodeName (ThreadID id);
+			static String  _ToQueueNodeName (VkQueue id);
+			static String  _ToNodeStyle (StringView name, const NodeStyle &style);
+			static String  _AcquirePresentNodeStyle (StringView name);
+			static String  _WaitOnHostNodeStyle (StringView name);
+			static String  _SubmitNodeStyle (StringView name);
+			static String  _CmdBatchNodeStyle (StringView name);
+			static String  _FenceNodeStyle (StringView name);
+			static String  _MakeSemaphoreEdge (UID from, UID to);
+			static String  _MakeSwapchainEdge (UID from, UID to);
+			static String  _MakeCpuToGpuSyncEdge (UID fromCpu, UID toGpu);
+			static String  _MakeGpuToCpuSyncEdge (UID fromGpu, UID toCpu);
+			static String  _MakeStrongHiddenEdge (StringView from, StringView to);
+		};
 
-		bool _SaveDotFile () const;
+		struct V2 {
+		};
+
+		bool _SaveDotFile_v1 () const;
+		bool _SaveDotFile_v2 () const;
 		void _Clear ();
 		
 		bool _Visualize (StringView graph, StringView filepath, StringView format) const;

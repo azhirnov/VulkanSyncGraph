@@ -7,7 +7,6 @@
 
 #include "src/IAnalyzer.h"
 
-#include "vulkan/vulkan.h"
 #include <mutex>
 
 namespace VSA
@@ -46,7 +45,7 @@ namespace VSA
 			HHOOK						_wndHook	= null;
 		#endif
 
-		static constexpr uint			_captureSize = 4;	// frames
+		static constexpr uint			_captureSize = 5;	// frames
 
 
 	// methods
@@ -160,6 +159,10 @@ namespace VSA
 			VkDevice                                    device,
 			uint32_t                                    fenceCount,
 			const VkFence*                              pFences);
+		
+		static VKAPI_ATTR VkResult VKAPI_CALL vki_GetFenceStatus(
+			VkDevice                                    device,
+			VkFence                                     fence);
 
 		static VKAPI_ATTR VkResult VKAPI_CALL vki_WaitForFences(
 			VkDevice                                    device,
@@ -421,6 +424,7 @@ namespace VSA
 		_visitor_( CreateFence ) \
 		_visitor_( DestroyFence ) \
 		_visitor_( ResetFences ) \
+		_visitor_( GetFenceStatus ) \
 		_visitor_( WaitForFences ) \
 		_visitor_( CreateSemaphore ) \
 		_visitor_( DestroySemaphore ) \

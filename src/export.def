@@ -1,4 +1,4 @@
-LIBRARY VkLayer_sync_analyzer
+LIBRARY VK_LAYER_AZ_sync_analyzer
 EXPORTS
 vkGetInstanceProcAddr
 vkGetDeviceProcAddr
